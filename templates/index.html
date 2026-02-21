@@ -1,0 +1,710 @@
+<!-- templates/index.html (简化版) -->
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>电压控制可视化</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.0/dist/echarts.min.js"></script>
+    <style>
+        .bus-low{color:red;font-weight:bold;}
+        .bus-high{color:orange;font-weight:bold;}
+        .llm-panel {
+            background-color: #f8f9fa;
+            border: 2px solid #ffc107;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+            max-height: 500px;
+            overflow-y: auto;
+        }
+        .llm-title {
+            color: #ff6b6b;
+            font-weight: bold;
+            font-size: 18px;
+            margin-bottom: 10px;
+            text-align: center;
+        }
+        .llm-text {
+            white-space: pre-wrap;
+            word-wrap: break-word;
+            font-size: 14px;
+            line-height: 1.6;
+            color: #333;
+            margin-bottom: 15px;
+        }
+        .action-comparison {
+            background-color: #fff3cd;
+            border: 1px solid #ffc107;
+            border-radius: 5px;
+            padding: 10px;
+            margin-bottom: 15px;
+        }
+        .action-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 5px 0;
+            border-bottom: 1px solid #ffeaa7;
+        }
+        .action-row:last-child {
+            border-bottom: none;
+        }
+        .action-name {
+            font-weight: bold;
+            min-width: 120px;
+        }
+        .action-value {
+            text-align: right;
+            min-width: 80px;
+        }
+        .decision-panel {
+            background-color: #e7f3ff;
+            border: 2px solid #0066cc;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 15px;
+            text-align: center;
+        }
+        .decision-title {
+            color: #0066cc;
+            font-weight: bold;
+            font-size: 16px;
+            margin-bottom: 10px;
+        }
+        .strategy-buttons {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            margin-bottom: 10px;
+            flex-wrap: wrap;
+        }
+        .btn-strategy {
+            padding: 10px 20px;
+            margin: 5px;
+            border: 2px solid #0066cc;
+            border-radius: 5px;
+            background-color: white;
+            color: #0066cc;
+            font-weight: bold;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-size: 14px;
+        }
+        .btn-strategy:hover {
+            background-color: #0066cc;
+            color: white;
+            transform: scale(1.05);
+        }
+        .btn-strategy.active {
+            background-color: #0066cc;
+            color: white;
+        }
+        .countdown {
+            color: #ff6b6b;
+            font-weight: bold;
+            font-size: 14px;
+        }
+        .waiting-indicator {
+            display: inline-block;
+            animation: pulse 1.5s infinite;
+            margin-right: 5px;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+    </style>
+</head>
+<body>
+<div class="container mt-4">
+    <h2>配电网电压控制实时监控</h2>
+    
+    <div class="row">
+        <div class="col-md-6">
+            <div class="card"><div class="card-body">
+                <p><strong>Step:</strong> <span id="step">-</span></p>
+                <p><strong>策略:</strong> <span id="policy">-</span></p>
+                <p><strong>低电压母线:</strong> <span id="low-buses">-</span></p>
+                <p><strong>高电压母线:</strong> <span id="high-buses">-</span></p>
+            </div></div>
+        </div>
+        <div class="col-md-6">
+            <div class="card"><div class="card-body" id="soc-display"></div></div>
+        </div>
+    </div>
+
+    <div class="row mt-3">
+        <div class="col-md-8">
+            <div class="card"><div class="card-body">
+                <h5>网络拓扑（点击节点查看电压）</h5>
+                <div id="topology-chart" style="width:100%;height:420px;display:flex;align-items:center;justify-content:center;color:#666;border:1px dashed #ddd;">拓扑图占位</div>
+            </div></div>
+        </div>
+        <div class="col-md-4">
+            <div class="card"><div class="card-body">
+                <h5>母线电压（点击节点显示时序）</h5>
+                <div id="voltage-chart" style="width:100%;height:420px;display:flex;align-items:center;justify-content:center;color:#666;border:1px dashed #ddd;">电压时序占位</div>
+            </div></div>
+        </div>
+    </div>
+
+    <div class="card mt-3">
+        <div class="card-body">
+            <h5>实时动作监控</h5>
+            <table class="table table-sm" id="action-table">
+                <thead><tr><th>设备</th><th>PARS</th><th>PPO</th><th>SAC</th></tr></thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+
+
+
+    <!-- LLM 回答面板 -->
+    <div id="llm-container"></div>
+</div>
+
+<script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+<script>
+const socket = io();
+const batNames = ['Battery.batt1','Battery.batt2','Battery.batt3','Battery.batt4','Battery.batt5'];
+const pvNames = ['s846pv','s850pv','s858pv','s862pv','s854pv'];
+
+let isWaitingForDecision = false;
+let countdownInterval = null;
+let currentLLMStep = null;
+
+// topology/voltage globals
+let selectedBus = null;
+let voltageBuffers = {}; // map busName -> [{t, v}, ...]
+// 日轴常量：每 5 分钟一个步，共 288 步
+const DAY_STEPS = 24 * 60 / 5; // 288
+const maxVoltagePoints = DAY_STEPS; // retain full-day history by default
+
+function generateDayTimes() {
+    const arr = [];
+    for (let m = 0; m < 24 * 60; m += 5) {
+        const hh = String(Math.floor(m / 60)).padStart(2, '0');
+        const mm = String(m % 60).padStart(2, '0');
+        arr.push(`${hh}:${mm}`);
+    }
+    return arr;
+}
+const dayTimes = generateDayTimes();
+
+function padToDay(series) {
+    if (!Array.isArray(series)) return Array(DAY_STEPS).fill(null);
+    if (series.length >= DAY_STEPS) return series.slice(-DAY_STEPS);
+    const pad = DAY_STEPS - series.length;
+    return Array(pad).fill(null).concat(series);
+}
+let voltChart = null; // will be initialized later
+let plotData = null; // will hold baselines and vol_list sent from test.py
+let currentStep = 0; // track latest simulation step for x-axis labels
+
+function createLimitMarkLine() {
+    return {
+        silent: true,
+        symbol: 'none',
+        data: [
+            { yAxis: 1.05, name: 'High Limit' },
+            { yAxis: 0.95, name: 'Low Limit' }
+        ],
+        lineStyle: { color: 'red', type: 'dashed', width: 1 }
+    };
+}
+
+socket.on('update_state', (state) => {
+     document.getElementById('step').textContent = state.step;
+     currentStep = Number(state.step) || 0;
+    document.getElementById('policy').textContent = state.current_policy;
+    
+    // 当状态更新时，检查是否仍在等待决策面板
+    const decisionPanel = document.querySelector('.decision-panel');
+    if (decisionPanel && !isWaitingForDecision) {
+        // 不在等待状态，隐藏决策面板
+        const llmPanel = document.querySelector('.llm-panel');
+        if (llmPanel) {
+            llmPanel.style.opacity = '0.5';
+            decisionPanel.style.display = 'none';
+        }
+    }
+    
+    const lowBuses = state.low_voltage_buses ? state.low_voltage_buses.join(', ') : '无';
+    document.getElementById('low-buses').innerHTML = 
+        state.low_voltage_buses && state.low_voltage_buses.length ? `<span class="bus-low">${lowBuses}</span>` : '无';
+
+    // 高电压母线显示：优先使用后端提供的列表，否则根据 bus_voltages 计算（阈值 1.05 p.u.）
+    let highBusesList = [];
+    if (state.high_voltage_buses && Array.isArray(state.high_voltage_buses)) {
+        highBusesList = state.high_voltage_buses.slice();
+    } else if (state.bus_voltages && typeof state.bus_voltages === 'object') {
+        for (const k of Object.keys(state.bus_voltages)) {
+            const vlist = state.bus_voltages[k];
+            let val = null;
+            if (Array.isArray(vlist)) {
+                const valid = vlist.filter(x => typeof x === 'number' && x > 0.001);
+                if (valid.length) val = valid.reduce((a,b)=>a+b,0)/valid.length;
+            } else if (typeof vlist === 'number') {
+                val = vlist;
+            }
+            if (typeof val === 'number' && val >= 1.05) {
+                highBusesList.push(k);
+            }
+        }
+    }
+    const highBuses = highBusesList.length ? highBusesList.join(', ') : '无';
+    document.getElementById('high-buses').innerHTML = highBusesList.length ? `<span class="bus-high">${highBuses}</span>` : '无';
+
+    // SOC 显示（使用硬编码的电池->节点映射）
+    const battNodeMap = {
+        'Battery.batt1': 846,
+        'Battery.batt2': 850,
+        'Battery.batt3': 858,
+        'Battery.batt4': 862,
+        'Battery.batt5': 854
+    };
+
+    let socHtml = '';
+    if (state.socs) {
+        state.socs.forEach((soc, i) => {
+            const devName = (batNames && batNames[i]) ? batNames[i] : `Battery.batt${i+1}`;
+            const nodeId = battNodeMap[devName] || null;
+            const displayName = nodeId ? `${devName} (节点 ${nodeId})` : devName;
+            socHtml += `<div>${displayName}: ${(soc*100).toFixed(1)}%</div>`;
+        });
+    }
+    document.getElementById('soc-display').innerHTML = socHtml || '-';
+
+    // 动作表格
+    const tbody = document.querySelector('#action-table tbody');
+    tbody.innerHTML = '';
+    if (state.actions) {
+        [...batNames, ...pvNames].forEach((name, i) => {
+            const row = `<tr>
+                <td>${name}</td>
+                <td>${state.actions.PARS ? state.actions.PARS[i].toFixed(3) : '-'}</td>
+                <td>${state.actions.PPO ? state.actions.PPO[i].toFixed(3) : '-'}</td>
+                <td>${state.actions.SAC ? state.actions.SAC[i].toFixed(3) : '-'}</td>
+            </tr>`;
+            tbody.innerHTML += row;
+        });
+    }
+
+    // 更新所有母线的历史缓冲（保持自页面加载起的完整历史）
+    if (typeof state.bus_voltages === 'object') {
+        for (const key of Object.keys(state.bus_voltages)) {
+            const vlist = state.bus_voltages[key];
+            let sampleVal = null;
+            if (Array.isArray(vlist)) {
+                const valid = vlist.filter(v => typeof v === 'number' && v > 0.001);
+                sampleVal = valid.length ? valid.reduce((a,b)=>a+b,0)/valid.length : 0;
+            } else if (typeof vlist === 'number') {
+                sampleVal = vlist;
+            }
+
+            if (sampleVal !== null) {
+                if (!voltageBuffers[key]) voltageBuffers[key] = [];
+                voltageBuffers[key].push({ t: Date.now(), v: sampleVal });
+                if (voltageBuffers[key].length > maxVoltagePoints) voltageBuffers[key].shift();
+            }
+        }
+
+        // 当选中某母线时，用其完整缓冲刷新图表（对齐到全天 5 分钟步）
+        if (selectedBus && voltChart) {
+            // 尝试找到匹配的缓冲 key（兼容大小写）
+            let bufKey = null;
+            if (voltageBuffers.hasOwnProperty(selectedBus)) bufKey = selectedBus;
+            else {
+                const lower = String(selectedBus).toLowerCase();
+                for (const k of Object.keys(voltageBuffers)) {
+                    if (String(k).toLowerCase() === lower) { bufKey = k; break; }
+                }
+            }
+            const buf = (bufKey && voltageBuffers[bufKey]) ? voltageBuffers[bufKey] : null;
+            if (buf) {
+                // use step indices as x-axis labels instead of absolute time
+                const endStep = currentStep || (buf.length - 1);
+                const startStep = endStep - buf.length + 1;
+                const times = buf.map((_, i) => String(startStep + i));
+                const vals = buf.map(d => d.v);
+                const opt = voltChart.getOption();
+                const hasLive = opt && opt.series && opt.series.some(s => s && s.name === 'Live');
+                if (hasLive) {
+                    voltChart.setOption({ xAxis: { data: times }, series: [{ name: 'Live', data: vals, markLine: createLimitMarkLine() }] }, false);
+                } else {
+                    voltChart.setOption({ xAxis: { data: times }, series: [{ data: vals, markLine: createLimitMarkLine() }] }, false);
+                }
+            }
+        }
+    }
+});
+
+// 接收后端发送的完整绘图数据（baselines 和 vol_list）
+socket.on('plot_data', (data) => {
+    console.log('Received plot_data', data);
+    plotData = data;
+});
+
+// 监听 LLM 响应
+socket.on('llm_response', (response) => {
+    console.log('LLM Response received:', response);
+    
+    const container = document.getElementById('llm-container');
+    
+    // 构建三个策略动作对比显示
+let actionHtml = '<div style="background-color: #fff3cd; border: 1px solid #ffc107; border-radius: 5px; padding: 10px; margin-bottom: 15px;">';
+actionHtml += `<strong>【Step ${response.step} 三个策略动作对比】</strong><br>`;
+actionHtml += `<div style="font-size: 11px; color: #666; margin-top: 5px;">
+    当前策略：<span style="color: #d9534f; font-weight: bold;">${response.current_policy}</span>
+    &nbsp;&nbsp;|&nbsp;&nbsp;
+    LLM推荐：请见下方分析
+</div>`;
+
+// 表格形式显示三个策略的对比
+actionHtml += `<table style="width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 11px;">
+    <thead>
+        <tr style="background-color: #f0f0f0;">
+            <th style="border: 1px solid #ddd; padding: 6px; text-align: left;">设备</th>
+            <th style="border: 1px solid #ddd; padding: 6px; text-align: center;">PARS</th>
+            <th style="border: 1px solid #ddd; padding: 6px; text-align: center;">PPO</th>
+            <th style="border: 1px solid #ddd; padding: 6px; text-align: center;">SAC</th>
+        </tr>
+    </thead>
+    <tbody>`;
+
+const allNames = [
+    ...response.device_names.batteries,
+    ...response.device_names.pvs
+];
+
+// 假设后端发送了三个策略的动作：response.actions.PARS/PPO/SAC
+allNames.forEach((name, i) => {
+    const parsVal = response.actions?.PARS?.[i] !== undefined ? response.actions.PARS[i].toFixed(3) : '-';
+    const ppoVal = response.actions?.PPO?.[i] !== undefined ? response.actions.PPO[i].toFixed(3) : '-';
+    const sacVal = response.actions?.SAC?.[i] !== undefined ? response.actions.SAC[i].toFixed(3) : '-';
+    
+    // 高亮当前策略列
+    const currentPolicy = response.current_policy;
+    const parsStyle = currentPolicy === 'PARS' ? 'background-color: #ffe0e0; font-weight: bold;' : '';
+    const ppoStyle = currentPolicy === 'PPO' ? 'background-color: #ffe0e0; font-weight: bold;' : '';
+    const sacStyle = currentPolicy === 'SAC' ? 'background-color: #ffe0e0; font-weight: bold;' : '';
+    
+    actionHtml += `<tr>
+        <td style="border: 1px solid #ddd; padding: 4px 6px;">${name}</td>
+        <td style="border: 1px solid #ddd; padding: 4px 6px; text-align: center; ${parsStyle}">${parsVal}</td>
+        <td style="border: 1px solid #ddd; padding: 4px 6px; text-align: center; ${ppoStyle}">${ppoVal}</td>
+        <td style="border: 1px solid #ddd; padding: 4px 6px; text-align: center; ${sacStyle}">${sacVal}</td>
+    </tr>`;
+});
+actionHtml += '</tbody></table>';
+
+    // 构建 LLM 回答
+    let llmHtml = `
+    <div class="llm-panel">
+        <div class="llm-title">⚡ LLM 专家决策(Step ${response.step})</div>
+        ${actionHtml}
+        <div class="llm-text">${response.llm_explanation.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
+        
+        <div class="decision-panel">
+            <div class="decision-title">
+                <span class="waiting-indicator">●</span>
+                等待你的决策...
+            </div>
+            <div style="margin-bottom: 10px; font-size: 14px;">
+                请选择继续使用的策略，或等待 <span class="countdown" id="countdown">60</span> 秒后自动保持当前策略
+            </div>
+            <div class="strategy-buttons" id="strategy-buttons">
+                <button class="btn-strategy ${response.current_policy === 'PARS' ? 'active' : ''}" 
+                        onclick="makeDecision('PARS')">
+                    PARS
+                </button>
+                <button class="btn-strategy ${response.current_policy === 'PPO' ? 'active' : ''}" 
+                        onclick="makeDecision('PPO')">
+                    PPO
+                </button>
+                <button class="btn-strategy ${response.current_policy === 'SAC' ? 'active' : ''}" 
+                        onclick="makeDecision('SAC')">
+                    SAC
+                </button>
+            </div>
+        </div>
+    </div>
+    `;
+    
+    // 更新状态
+    currentLLMStep = response.step;
+    isWaitingForDecision = true;
+    
+    container.innerHTML = llmHtml;
+    
+    // 平滑滚动到 LLM 面板
+    setTimeout(() => {
+        document.querySelector('.llm-panel').scrollIntoView({ behavior: 'smooth' });
+    }, 100);
+    
+    // 启动倒计时
+    startCountdown();
+});
+
+// 监听决策接收确认
+socket.on('decision_received', (data) => {
+    console.log('Decision received confirmation:', data);
+    if (data.status === 'success') {
+        // 更新按钮状态
+        const buttons = document.querySelectorAll('.btn-strategy');
+        buttons.forEach(btn => {
+            btn.classList.remove('active');
+            btn.disabled = false;  // 重新启用按钮（以防用户想再选一次）
+        });
+        
+        // 高亮新的当前策略
+        buttons.forEach(btn => {
+            if (btn.textContent.includes(data.policy)) {
+                btn.classList.add('active');
+                btn.disabled = true;  // 禁用当前按钮
+            }
+        });
+        
+        // 显示确认消息
+        const title = document.querySelector('.decision-title');
+        if (title) {
+            title.innerHTML = `✅ 已切换至 <strong>${data.policy}</strong> 策略，等待后端确认...`;
+            title.style.color = '#00a000';
+        }
+        
+        // 停止倒计时
+        if (countdownInterval) {
+            clearInterval(countdownInterval);
+        }
+        
+        // 5 秒后再标记为不等待
+        setTimeout(() => {
+            isWaitingForDecision = false;
+            const llmPanel = document.querySelector('.llm-panel');
+            if (llmPanel) {
+                llmPanel.style.opacity = '0.5';
+                llmPanel.style.pointerEvents = 'none';
+            }
+        }, 5000);
+    } else if (data.status === 'error') {
+        alert('决策提交失败: ' + data.message);
+        const buttons = document.querySelectorAll('.btn-strategy');
+        buttons.forEach(btn => btn.disabled = false);
+    }
+});
+
+function makeDecision(policy) {
+    if (!isWaitingForDecision) {
+        console.log('Not waiting for decision');
+        return;
+    }
+    
+    console.log('Making decision:', policy);
+    
+    // 禁用所有按钮
+    const buttons = document.querySelectorAll('.btn-strategy');
+    buttons.forEach(btn => btn.disabled = true);
+    
+    // 发送决策到后端
+    socket.emit('send_decision', { policy: policy });
+}
+
+function startCountdown() {
+    let secondsLeft = 60;
+    const countdownEl = document.getElementById('countdown');
+    
+    if (countdownInterval) {
+        clearInterval(countdownInterval);
+    }
+    
+    countdownInterval = setInterval(() => {
+        secondsLeft--;
+        if (countdownEl) {
+            countdownEl.textContent = secondsLeft;
+        }
+        
+        if (secondsLeft <= 0) {
+            clearInterval(countdownInterval);
+            if (isWaitingForDecision) {
+                // 倒计时结束，自动保持当前策略
+                const title = document.querySelector('.decision-title');
+                if (title) {
+                    title.innerHTML = '⏱️ 倒计时已结束，保持当前策略继续运行...';
+                    title.style.color = '#ff9800';
+                }
+                isWaitingForDecision = false;
+            }
+        }
+    }, 1000);
+}
+
+// ====== 拓扑与电压图（从 /api/topology 加载） ======
+try {
+    const topoChart = echarts.init(document.getElementById('topology-chart'));
+    voltChart = echarts.init(document.getElementById('voltage-chart'));
+
+    const pvStorageNodes = new Set(['850', '854', '858', '846', '862']);
+
+    fetch('/api/topology')
+        .then(res => res.json())
+        .then(data => {
+            // 将节点按类别标注（与 templates/topology.html 保持一致）
+            // 拉大纵向间距，同时为 sourcebus 使用竖向矩形标记
+            const verticalFactor = 1.6;
+            const nodesWithColor = data.nodes.map(node => {
+                const nameLower = node.name ? String(node.name).toLowerCase() : '';
+                const isSource = nameLower === 'sourcebus' || node.id === 'sourcebus';
+
+                // choose symbolSize first (scale sourcebus proportionally to base size)
+                const baseSymbol = 20;
+                // sourcebus 矩形高度为基准的 2.4 倍，下面再乘 2 得到最终高度（即当前的两倍）
+                let symbolSizeVal = isSource ? [Math.round(baseSymbol * 0.4), Math.round(baseSymbol * 2.4 * 2)] : baseSymbol;
+
+                // compute font size proportional to symbol height
+                let height = Array.isArray(symbolSizeVal) ? symbolSizeVal[1] : symbolSizeVal;
+                let computedFontSize = Math.max(8, Math.round(height * 0.05));
+
+                // vertical label for sourcebus: split chars with newline
+                const labelText = isSource && node.name ? String(node.name).split('').join('\n') : '{b}';
+
+                const base = {
+                    id: node.id,
+                    name: node.name,
+                    x: node.x,
+                    y: (typeof node.y === 'number') ? node.y * verticalFactor : node.y,
+                    category: pvStorageNodes.has(node.name) ? '光伏/储能节点' : '普通节点',
+                    symbolSize: symbolSizeVal,
+                    label: {
+                        show: true,
+                        position: 'inside',
+                        formatter: labelText,
+                        color: '#ffffff',
+                        fontSize: computedFontSize,
+                        align: 'center'
+                    }
+                };
+
+                if (isSource) {
+                    base.symbol = 'rect';
+                    base.itemStyle = { color: '#ff7f50' };
+                }
+
+                return base;
+            });
+
+            const option = {
+                legend: {
+                    data: [
+                        { name: '普通节点', icon: 'circle' },
+                        { name: '光伏/储能节点', icon: 'circle' }
+                    ],
+                    left: 'center',
+                    top: 6
+                },
+                    series: [{
+                    type: 'graph',
+                    layout: 'none',
+                    roam: true,
+                    draggable: false,
+                    focusNodeAdjacency: true,
+                    symbolSize: 20,
+                    label: { show: true, position: 'inside', color: '#fff' },
+                    lineStyle: { color: '#aaa', width: 1.2, curveness: 0 },
+                    emphasis: { lineStyle: { width: 3 } },
+                    data: nodesWithColor,
+                    links: data.links,
+                    categories: [
+                        { name: '普通节点', itemStyle: { color: '#5470c6' } },
+                        { name: '光伏/储能节点', itemStyle: { color: '#d14a61' } }
+                    ]
+                }]
+            };
+
+            topoChart.setOption(option);
+
+            topoChart.on('click', params => {
+                if (params && params.data && params.data.name) {
+                    const name = params.data.name;
+                    console.log('topology node clicked:', name, params);
+                    selectedBus = name;
+
+                    // helper: find a matching buffer key (case-insensitive)
+                    function findBufferKey(busName) {
+                        if (!busName) return null;
+                        if (voltageBuffers.hasOwnProperty(busName)) return busName;
+                        const lower = String(busName).toLowerCase();
+                        for (const k of Object.keys(voltageBuffers)) {
+                            if (String(k).toLowerCase() === lower) return k;
+                        }
+                        return busName; // fallback to raw name
+                    }
+
+                    const bufKey = findBufferKey(name);
+                    const buf = (bufKey && voltageBuffers[bufKey]) ? voltageBuffers[bufKey] : [];
+
+                    // If full plot data available, draw baseline and historical controlled series consistent with test.py
+                    if (plotData && plotData.all_buses) {
+                        const busIndex = plotData.all_buses.indexOf(name);
+                        const baselinePV = plotData.vol_baseline_PVnoQ[name] || [];
+                        const baselineNoPV = plotData.vol_baseline_NoPV[name] || [];
+                        const vollistEntry = (busIndex >= 0 && plotData.vol_list[busIndex]) ? plotData.vol_list[busIndex].slice(1) : [];
+
+                        const times = vollistEntry.map((_, idx) => String(idx));
+                        // initialize Live series with the available buffer aligned to the right (latest points)
+                        let liveData = [];
+                        if (vollistEntry.length && buf.length) {
+                            // align by taking the last buf.length points and pad the left with nulls to match vollistEntry length
+                            const pad = Math.max(0, vollistEntry.length - buf.length);
+                            liveData = Array(pad).fill(null).concat(buf.map(d => d.v));
+                        } else if (vollistEntry.length) {
+                            liveData = vollistEntry.slice();
+                        } else {
+                            liveData = buf.map(d => d.v);
+                        }
+
+                        const option3 = {
+                            title: { text: `母线 ${name} 电压对比` },
+                            tooltip: { trigger: 'axis' },
+                            legend: { data: ['PV (Q=0)', 'No PV', 'PV_Q Controlled', 'Live'] },
+                            grid: { left: '6%', right: '6%', containLabel: true },
+                            xAxis: { type: 'category', data: times, name: 'Time Steps', axisLabel: { interval: 12 } },
+                            yAxis: { type: 'value', name: 'Voltage (p.u.)' },
+                            series: [
+                                { name: 'PV (Q=0)', type: 'line', data: baselinePV, smooth: true, lineStyle: { type: 'dashed' } },
+                                { name: 'No PV', type: 'line', data: baselineNoPV, smooth: true, lineStyle: { type: 'dotted' } },
+                                { name: 'PV_Q Controlled', type: 'line', data: vollistEntry, smooth: true, lineStyle: { width: 2, color: 'green' } },
+                                { name: 'Live', type: 'line', data: liveData, smooth: true, showSymbol: false, markLine: createLimitMarkLine() }
+                            ]
+                        };
+
+                        voltChart.setOption(option3, true);
+                    } else {
+                        // fallback: initialize live chart populated with accumulated buffer history
+                        const endStep = currentStep || (buf.length - 1);
+                        const startStep = endStep - buf.length + 1;
+                        const times = buf.map((_, i) => String(startStep + i));
+                        const vals = buf.map(d => d.v);
+                        const initOption = {
+                            title: { text: `母线 ${name} 实时电压` },
+                            tooltip: { trigger: 'axis' },
+                            grid: { left: '12%', right: '12%', containLabel: true },
+                            xAxis: { type: 'category', data: times, name: 'Step' },
+                            yAxis: { type: 'value', min: 0.8, max: 1.2, axisLabel: { formatter: '{value} p.u.' } },
+                            series: [{ name: 'Live', type: 'line', data: vals, showSymbol: false, smooth: true, markLine: createLimitMarkLine() }]
+                        };
+                        voltChart.setOption(initOption, true);
+                    }
+                }
+            });
+        })
+        .catch(err => {
+            console.error('Failed to load topology:', err);
+            topoChart.showLoading({ text: '加载失败，请检查后端服务', color: '#c23531' });
+        });
+} catch (e) {
+    console.warn('ECharts init failed or DOM missing:', e);
+}
+</script>
+</body>
+</html>

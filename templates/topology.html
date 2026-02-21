@@ -1,0 +1,107 @@
+<!-- templates/topology.html -->
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>配电网拓扑图</title>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.0/dist/echarts.min.js"></script>
+    <style>
+        #chart {
+            width: 100%;
+            height: 90vh;
+            border: 1px solid #ddd;
+        }
+    </style>
+</head>
+<body>
+    <h2 style="text-align: center;">配电网拓扑图（含光伏/储能节点）</h2>
+    <div id="chart"></div>
+
+    <script>
+        const chart = echarts.init(document.getElementById('chart'));
+
+        // 定义哪些节点是光伏/储能节点（标红）
+        const pvStorageNodes = new Set(['850', '854', '858', '846', '862']);
+
+        fetch('/api/topology')
+            .then(res => res.json())
+            .then(data => {
+                // 为每个节点添加 itemStyle.color
+                const nodesWithColor = data.nodes.map(node => {
+                    if (pvStorageNodes.has(node.name)) {
+                        return {
+                            ...node,
+                            category: '光伏/储能节点'  // 用于图例分类
+                        };
+                    } else {
+                        return {
+                            ...node,
+                            category: '普通节点'
+                        };
+                    }
+                });
+
+                const option = {
+                    // ===== 图例 =====
+                    legend: {
+                        data: [
+                            { name: '普通节点', icon: 'circle' },
+                            { name: '光伏/储能节点', icon: 'circle' }
+                        ],
+                        left: 'center',
+                        top: 10
+                    },
+
+                    series: [{
+                        type: 'graph',
+                        layout: 'none',          // 使用 manual_coords 提供的坐标
+                        roam: true,
+                        draggable: false,
+                        focusNodeAdjacency: true,
+                        symbolSize: 30,
+                        label: {
+                            show: true,
+                            position: 'right',
+                            fontSize: 8
+                        },
+                        lineStyle: {
+                            color: '#aaa',
+                            width: 1.5,
+                            curveness: 0.1
+                        },
+                        emphasis: {
+                            lineStyle: { width: 3 }
+                        },
+
+                        // ===== 节点数据 =====
+                        data: nodesWithColor,
+
+                        // ===== 连接边 =====
+                        links: data.links,
+
+                        // ===== 分类样式 =====
+                        categories: [
+                            {
+                                name: '普通节点',
+                                itemStyle: { color: '#5470c6' }  // 默认蓝色
+                            },
+                            {
+                                name: '光伏/储能节点',
+                                itemStyle: { color: '#d14a61' }  // 红色（光伏/储能）
+                            }
+                        ]
+                    }]
+                };
+
+                chart.setOption(option);
+            })
+            .catch(err => {
+                console.error("Failed to load topology:", err);
+                chart.showLoading({
+                    text: '加载失败，请检查后端服务',
+                    color: '#c23531'
+                });
+            });
+    </script>
+</body>
+</html>
