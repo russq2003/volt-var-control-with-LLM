@@ -71,19 +71,85 @@ def trigger_llm(env):
 
     return False
 
+
+def compute_worst_phase(voltage_list):
+    """
+    从给定的母线电压数组中提取三相近似值并返回：
+    - phases: dict {'A':vA, 'B':vB, 'C':vC}
+    - mean: 平均值（有效相的算术平均）
+    - worst_phase: {'name': 'A'/'B'/'C', 'value': v, 'deviation': abs(v-1.0)}
+
+    说明：函数尽量兼容不同长度的 voltage_list：
+    - 如果包含 >=3 个元素，使用前 3 个作为 A/B/C
+    - 如果只有 1 个元素，认为三相相等
+    - 如果长度介于 2 与 3 之间，缺失相会重复最后一个已知值以填充
+    该函数仅添加只读计算，不修改外部状态，保证向后兼容。
+    """
+    vals = [v for v in (voltage_list or []) if isinstance(v, (int, float))]
+    # 默认三相占位
+    if not vals:
+        phases = {'A': 0.0, 'B': 0.0, 'C': 0.0}
+    elif len(vals) == 1:
+        phases = {'A': vals[0], 'B': vals[0], 'C': vals[0]}
+    else:
+        # try to pick first three meaningful entries
+        if len(vals) >= 3:
+            a, b, c = vals[0], vals[1], vals[2]
+        else:
+            # len == 2 -> repeat second as third
+            a, b = vals[0], vals[1]
+            c = vals[1]
+        phases = {'A': a, 'B': b, 'C': c}
+
+    # compute mean over available phase values > 0
+    phase_values = [v for v in phases.values() if isinstance(v, (int, float)) and v > 0.0]
+    mean_val = float(sum(phase_values) / len(phase_values)) if phase_values else 0.0
+
+    # worst phase = max abs deviation from 1.0
+    worst_name = None
+    worst_val = None
+    worst_dev = -1.0
+    for name, v in phases.items():
+        if not isinstance(v, (int, float)):
+            continue
+        dev = abs(v - 1.0)
+        if dev > worst_dev:
+            worst_dev = dev
+            worst_name = name
+            worst_val = v
+
+    return {
+        'phases': phases,
+        'mean': mean_val,
+        'worst_phase': {'name': worst_name, 'value': worst_val, 'deviation': worst_dev}
+    }
+
 def llm_prompt(env, pars_action, ppo_action, sac_action, current_main_policy):
 
     # === 1. 提取关键状态 ===
     bus_voltages = env.obs['bus_voltages']
+    bus_voltage_display = env.obs.get('bus_voltage_display', {})
     low_v_buses = []
     high_v_buses = []
     for bus, v_list in bus_voltages.items():
-        for v in v_list:
-            if v > 0.001:  # 有效电压
+        # Use worst phase for display and append phase name
+        disp = bus_voltage_display.get(bus)
+        if disp and disp['worst_phase'] and disp['worst_phase']['value'] is not None:
+            v = disp['worst_phase']['value']
+            pname = disp['worst_phase']['name']
+            if v > 0.001:
                 if v < 0.95:
-                    low_v_buses.append(f"{bus}: {v:.3f}")
+                    low_v_buses.append(f"{bus}: {v:.3f} ({pname}相)")
                 elif v > 1.05:
-                    high_v_buses.append(f"{bus}: {v:.3f}")
+                    high_v_buses.append(f"{bus}: {v:.3f} ({pname}相)")
+        else:
+            # fallback: original logic
+            for v in v_list:
+                if v > 0.001:
+                    if v < 0.95:
+                        low_v_buses.append(f"{bus}: {v:.3f}")
+                    elif v > 1.05:
+                        high_v_buses.append(f"{bus}: {v:.3f}")
 
     bat_statuses = env.obs['bat_statuses']
     low_soc_bats = [name for name, (soc, _) in bat_statuses.items() if soc < 0.1]
@@ -425,9 +491,20 @@ class SingleRolloutSlaver(object):
             bat_statuses = self.env.obs.get('bat_statuses', {})
             soc_list = [bat_statuses.get(f'Battery.batt{i+1}', [0.5])[0] for i in range(5)]
 
+            # prepare a display-friendly per-bus voltage structure (phases, mean, worst phase)
+            bus_voltage_display = dict()
+            for bus, v_list in self.env.obs.get('bus_voltages', {}).items():
+                info = compute_worst_phase(v_list)
+                bus_voltage_display[bus] = {
+                    'phases': [info['phases'].get('A'), info['phases'].get('B'), info['phases'].get('C')],
+                    'mean': info['mean'],
+                    'worst_phase': info['worst_phase']
+                }
+
             state = {
                         "step": episode_steps,
                         "bus_voltages": self.env.obs['bus_voltages'],
+                        "bus_voltage_display": bus_voltage_display,
                         "socs": soc_list,
                         "actions": {
                             "PARS": PARS_action[8:].tolist(),

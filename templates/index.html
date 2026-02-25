@@ -166,9 +166,24 @@
 
 <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
 <script>
-const socket = io();
+
+const socket = io();  // 连接到 Socket.IO 服务器
 const batNames = ['Battery.batt1','Battery.batt2','Battery.batt3','Battery.batt4','Battery.batt5'];
 const pvNames = ['s846pv','s850pv','s858pv','s862pv','s854pv'];
+
+// === 归一化动作还原参数（如需调整请同步后端） ===
+const BATTERY_MAX_KW = 2000; // kW, 电池最大充/放电功率
+const PV_MAX_KVAR = 500;     // kvar, 光伏最大无功
+
+// 归一化动作值 [-1,1] 还原为真实物理量（单位：kW/kvar）
+function restoreBatteryAction(normVal) {
+    // 电池: -1~1 -> -2000~2000 kW
+    return normVal * BATTERY_MAX_KW;
+}
+function restorePVAction(normVal) {
+    // PV: -1~1 -> -500~500 kvar
+    return normVal * PV_MAX_KVAR;
+}
 
 let isWaitingForDecision = false;
 let countdownInterval = null;
@@ -281,11 +296,16 @@ socket.on('update_state', (state) => {
     tbody.innerHTML = '';
     if (state.actions) {
         [...batNames, ...pvNames].forEach((name, i) => {
+            // 判断是电池还是PV
+            const isBat = i < batNames.length;
+            const restore = isBat ? restoreBatteryAction : restorePVAction;
+            const unit = isBat ? 'kW' : 'kvar';
+            const showVal = (arr, idx) => (arr && arr[idx] !== undefined) ? `${restore(arr[idx]).toFixed(1)} ${unit}` : '-';
             const row = `<tr>
                 <td>${name}</td>
-                <td>${state.actions.PARS ? state.actions.PARS[i].toFixed(3) : '-'}</td>
-                <td>${state.actions.PPO ? state.actions.PPO[i].toFixed(3) : '-'}</td>
-                <td>${state.actions.SAC ? state.actions.SAC[i].toFixed(3) : '-'}</td>
+                <td>${showVal(state.actions.PARS, i)}</td>
+                <td>${showVal(state.actions.PPO, i)}</td>
+                <td>${showVal(state.actions.SAC, i)}</td>
             </tr>`;
             tbody.innerHTML += row;
         });
@@ -296,16 +316,35 @@ socket.on('update_state', (state) => {
         for (const key of Object.keys(state.bus_voltages)) {
             const vlist = state.bus_voltages[key];
             let sampleVal = null;
-            if (Array.isArray(vlist)) {
+            // Prefer backend-provided worst-phase scalar for plotting to match LLM/analysis
+            if (state.bus_voltage_display && state.bus_voltage_display[key] && state.bus_voltage_display[key].worst_phase && state.bus_voltage_display[key].worst_phase.value !== undefined) {
+                sampleVal = Number(state.bus_voltage_display[key].worst_phase.value);
+            } else if (meanMap && meanMap[key] !== undefined) {
+                sampleVal = Number(meanMap[key]);
+            } else if (state.bus_voltage_display && state.bus_voltage_display[key] && state.bus_voltage_display[key].mean !== undefined) {
+                sampleVal = Number(state.bus_voltage_display[key].mean);
+            } else if (Array.isArray(vlist)) {
                 const valid = vlist.filter(v => typeof v === 'number' && v > 0.001);
                 sampleVal = valid.length ? valid.reduce((a,b)=>a+b,0)/valid.length : 0;
             } else if (typeof vlist === 'number') {
                 sampleVal = vlist;
             }
 
+            // capture three-phase details if provided by backend
+            let phasesArr = null;
+            if (state.bus_voltage_display && state.bus_voltage_display[key] && Array.isArray(state.bus_voltage_display[key].phases)) {
+                phasesArr = state.bus_voltage_display[key].phases.slice(0,3);
+            } else if (Array.isArray(vlist)) {
+                // try to extract up to 3 phase values
+                const valid = vlist.filter(v => typeof v === 'number');
+                phasesArr = [valid[0] || null, valid[1] || valid[0] || null, valid[2] || valid[1] || valid[0] || null];
+            } else if (typeof vlist === 'number') {
+                phasesArr = [vlist, vlist, vlist];
+            }
+
             if (sampleVal !== null) {
                 if (!voltageBuffers[key]) voltageBuffers[key] = [];
-                voltageBuffers[key].push({ t: Date.now(), v: sampleVal });
+                voltageBuffers[key].push({ t: Date.now(), v: sampleVal, phases: phasesArr });
                 if (voltageBuffers[key].length > maxVoltagePoints) voltageBuffers[key].shift();
             }
         }
@@ -327,13 +366,13 @@ socket.on('update_state', (state) => {
                 const endStep = currentStep || (buf.length - 1);
                 const startStep = endStep - buf.length + 1;
                 const times = buf.map((_, i) => String(startStep + i));
-                const vals = buf.map(d => d.v);
+                const dataObjs = buf.map(d => ({ value: d.v, phases: d.phases }));
                 const opt = voltChart.getOption();
                 const hasLive = opt && opt.series && opt.series.some(s => s && s.name === 'Live');
                 if (hasLive) {
-                    voltChart.setOption({ xAxis: { data: times }, series: [{ name: 'Live', data: vals, markLine: createLimitMarkLine() }] }, false);
+                    voltChart.setOption({ xAxis: { data: times }, series: [{ name: 'Live', data: dataObjs, markLine: createLimitMarkLine() }] }, false);
                 } else {
-                    voltChart.setOption({ xAxis: { data: times }, series: [{ data: vals, markLine: createLimitMarkLine() }] }, false);
+                    voltChart.setOption({ xAxis: { data: times }, series: [{ data: dataObjs, markLine: createLimitMarkLine() }] }, false);
                 }
             }
         }
@@ -361,7 +400,8 @@ actionHtml += `<div style="font-size: 11px; color: #666; margin-top: 5px;">
     LLM推荐：请见下方分析
 </div>`;
 
-// 表格形式显示三个策略的对比
+
+// 表格形式显示三个策略的对比（显示还原后的真实值，括号内显示归一化值）
 actionHtml += `<table style="width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 11px;">
     <thead>
         <tr style="background-color: #f0f0f0;">
@@ -377,19 +417,21 @@ const allNames = [
     ...response.device_names.batteries,
     ...response.device_names.pvs
 ];
+const isBat = idx => idx < response.device_names.batteries.length;
+const restore = (idx, val) => isBat(idx) ? restoreBatteryAction(val) : restorePVAction(val);
+const unit = idx => isBat(idx) ? 'kW' : 'kvar';
+const showVal = (arr, idx) => (arr && arr[idx] !== undefined) ? `${restore(idx, arr[idx]).toFixed(1)} ${unit(idx)}` : '-';
 
 // 假设后端发送了三个策略的动作：response.actions.PARS/PPO/SAC
 allNames.forEach((name, i) => {
-    const parsVal = response.actions?.PARS?.[i] !== undefined ? response.actions.PARS[i].toFixed(3) : '-';
-    const ppoVal = response.actions?.PPO?.[i] !== undefined ? response.actions.PPO[i].toFixed(3) : '-';
-    const sacVal = response.actions?.SAC?.[i] !== undefined ? response.actions.SAC[i].toFixed(3) : '-';
-    
+    const parsVal = showVal(response.actions?.PARS, i);
+    const ppoVal = showVal(response.actions?.PPO, i);
+    const sacVal = showVal(response.actions?.SAC, i);
     // 高亮当前策略列
     const currentPolicy = response.current_policy;
     const parsStyle = currentPolicy === 'PARS' ? 'background-color: #ffe0e0; font-weight: bold;' : '';
     const ppoStyle = currentPolicy === 'PPO' ? 'background-color: #ffe0e0; font-weight: bold;' : '';
     const sacStyle = currentPolicy === 'SAC' ? 'background-color: #ffe0e0; font-weight: bold;' : '';
-    
     actionHtml += `<tr>
         <td style="border: 1px solid #ddd; padding: 4px 6px;">${name}</td>
         <td style="border: 1px solid #ddd; padding: 4px 6px; text-align: center; ${parsStyle}">${parsVal}</td>
@@ -652,20 +694,28 @@ try {
 
                         const times = vollistEntry.map((_, idx) => String(idx));
                         // initialize Live series with the available buffer aligned to the right (latest points)
-                        let liveData = [];
+                        let liveDataObjs = [];
                         if (vollistEntry.length && buf.length) {
                             // align by taking the last buf.length points and pad the left with nulls to match vollistEntry length
                             const pad = Math.max(0, vollistEntry.length - buf.length);
-                            liveData = Array(pad).fill(null).concat(buf.map(d => d.v));
+                            const padObjs = Array(pad).fill({ value: null, phases: null });
+                            liveDataObjs = padObjs.concat(buf.map(d => ({ value: d.v, phases: d.phases })));
                         } else if (vollistEntry.length) {
-                            liveData = vollistEntry.slice();
+                            liveDataObjs = vollistEntry.map(v => ({ value: v, phases: null }));
                         } else {
-                            liveData = buf.map(d => d.v);
+                            liveDataObjs = buf.map(d => ({ value: d.v, phases: d.phases }));
                         }
 
                         const option3 = {
                             title: { text: `母线 ${name} 电压对比` },
-                            tooltip: { trigger: 'axis' },
+                            tooltip: { trigger: 'axis', formatter: function(params) {
+                                const p = (Array.isArray(params) ? params.find(x=>x.seriesName==='Live') || params[0] : params);
+                                if (!p || !p.data) return '';
+                                const val = (p.data && p.data.value != null) ? p.data.value : null;
+                                const phases = (p.data && p.data.phases) ? p.data.phases : [null,null,null];
+                                const fmt = v => (typeof v === 'number') ? v.toFixed(3) : '-';
+                                return `${p.seriesName} ${p.axisValue}<br/>Value: ${val!==null?val.toFixed(3):'-'} p.u.<br/>A: ${fmt(phases[0])}  B: ${fmt(phases[1])}  C: ${fmt(phases[2])}`;
+                            } },
                             legend: { data: ['PV (Q=0)', 'No PV', 'PV_Q Controlled', 'Live'] },
                             grid: { left: '6%', right: '6%', containLabel: true },
                             xAxis: { type: 'category', data: times, name: 'Time Steps', axisLabel: { interval: 12 } },
@@ -674,7 +724,7 @@ try {
                                 { name: 'PV (Q=0)', type: 'line', data: baselinePV, smooth: true, lineStyle: { type: 'dashed' } },
                                 { name: 'No PV', type: 'line', data: baselineNoPV, smooth: true, lineStyle: { type: 'dotted' } },
                                 { name: 'PV_Q Controlled', type: 'line', data: vollistEntry, smooth: true, lineStyle: { width: 2, color: 'green' } },
-                                { name: 'Live', type: 'line', data: liveData, smooth: true, showSymbol: false, markLine: createLimitMarkLine() }
+                                { name: 'Live', type: 'line', data: liveDataObjs, smooth: true, showSymbol: false, markLine: createLimitMarkLine() }
                             ]
                         };
 
@@ -687,11 +737,18 @@ try {
                         const vals = buf.map(d => d.v);
                         const initOption = {
                             title: { text: `母线 ${name} 实时电压` },
-                            tooltip: { trigger: 'axis' },
+                            tooltip: { trigger: 'axis', formatter: function(params) {
+                                const p = (Array.isArray(params) ? params.find(x=>x.seriesName==='Live') || params[0] : params);
+                                if (!p || !p.data) return '';
+                                const val = (p.data && p.data.value != null) ? p.data.value : null;
+                                const phases = (p.data && p.data.phases) ? p.data.phases : [null,null,null];
+                                const fmt = v => (typeof v === 'number') ? v.toFixed(3) : '-';
+                                return `${p.seriesName} ${p.axisValue}<br/>Value: ${val!==null?val.toFixed(3):'-'} p.u.<br/>A: ${fmt(phases[0])}  B: ${fmt(phases[1])}  C: ${fmt(phases[2])}`;
+                            } },
                             grid: { left: '12%', right: '12%', containLabel: true },
                             xAxis: { type: 'category', data: times, name: 'Step' },
                             yAxis: { type: 'value', min: 0.8, max: 1.2, axisLabel: { formatter: '{value} p.u.' } },
-                            series: [{ name: 'Live', type: 'line', data: vals, showSymbol: false, smooth: true, markLine: createLimitMarkLine() }]
+                            series: [{ name: 'Live', type: 'line', data: buf.map(d=>({value:d.v, phases:d.phases})), showSymbol: false, smooth: true, markLine: createLimitMarkLine() }]
                         };
                         voltChart.setOption(initOption, true);
                     }
