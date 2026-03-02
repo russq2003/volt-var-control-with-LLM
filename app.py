@@ -9,6 +9,7 @@ import os
 from flask import Flask, render_template, jsonify
 from flask_socketio import SocketIO
 from topology_server import extract_topology_from_env
+from Qwen import call_qwen
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
@@ -76,6 +77,7 @@ def receive_decision(data):
         'policy': 'PARS'/'PPO'/'SAC'
     }
     """
+    
     try:
         chosen_policy = data.get('policy')
         if chosen_policy not in ['PARS', 'PPO', 'SAC']:
@@ -116,6 +118,32 @@ def receive_decision(data):
             'message': str(e)
         })
         return {'status': 'error', 'message': str(e)}
+    
+@socketio.on('send_chat_message')
+def handle_chat_message(json_data):
+    user_msg = json_data.get('message')
+    context = json_data.get('context', {})
+    
+    # 1. 构建 Prompt (结合当前电网状态)
+    system_prompt = f"""
+    你是配电网调度专家。
+    当前系统状态：
+    - Step: {context.get('step')}
+    - 策略：{context.get('policy')}
+    - 低电压母线：{context.get('lowBuses')}
+    - 高电压母线：{context.get('highBuses')}
+    
+    请基于上述实时数据，简洁地回答用户问题。如果用户问的是通用知识，直接回答即可。
+    """
+    
+    # 2. 调用你的 LLM 函数 (复用之前的 llm_client 或 test.py 中的逻辑)
+    # 假设你有一个函数 get_llm_response(prompt)
+    full_prompt = system_prompt + "\n用户问题：" + user_msg
+    # 3. 流式推送到前端
+    explanation = ""
+    for chunk in call_qwen(full_prompt):
+        explanation += chunk
+        socketio.emit('receive_chat_response', {'text': chunk})
 
 
 @app.route('/api/topology')

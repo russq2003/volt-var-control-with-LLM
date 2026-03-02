@@ -403,7 +403,11 @@ class SingleRolloutSlaver(object):
                 print(f"\n[!] 检测到异常状态，启动 LLM 协同决策 (Step {episode_steps})", flush=True)
                 print_detailed_actions(PARS_action, PPO_action, SAC_action)
                 prompt = llm_prompt(self.env, action_combined, PPO_action[8:], SAC_action[8:], current_main_policy)
-                explanation = call_qwen(prompt)
+
+                explanation = ""
+                for chunk in call_qwen(prompt):
+                    # print(chunk, end="", flush=True) # end="" 防止换行，flush=True 确保立即输出
+                    explanation += chunk
 
                 print("\n【LLM 专家建议】", flush=True)
                 print("-" * 40, flush=True)

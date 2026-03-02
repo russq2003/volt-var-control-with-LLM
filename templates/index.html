@@ -113,6 +113,147 @@
             0%, 100% { opacity: 1; }
             50% { opacity: 0.5; }
         }
+
+            /* --- LLM 聊天悬浮窗样式 --- */
+            .llm-chat-toggle {
+                position: fixed;
+                bottom: 20px;
+                right: 20px;
+                width: 60px;
+                height: 60px;
+                border-radius: 50%;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                border: none;
+                box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+                font-size: 24px;
+                cursor: pointer;
+                z-index: 9998;
+                transition: transform 0.3s;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+            .llm-chat-toggle:hover {
+                transform: scale(1.1);
+            }
+
+            .llm-chat-widget {
+                position: fixed;
+                bottom: 90px;
+                right: 20px;
+                width: 350px;
+                height: 500px;
+                background: white;
+                border-radius: 12px;
+                box-shadow: 0 5px 25px rgba(0,0,0,0.15);
+                z-index: 9999;
+                display: flex;
+                flex-direction: column;
+                overflow: hidden;
+                border: 1px solid #e0e0e0;
+                animation: slideUp 0.3s ease-out;
+            }
+
+            @keyframes slideUp {
+                from { opacity: 0; transform: translateY(20px); }
+                to { opacity: 1; transform: translateY(0); }
+            }
+
+            .chat-header {
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+                padding: 12px 15px;
+                font-weight: bold;
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+            }
+
+            .btn-close-sm {
+                background: none;
+                border: none;
+                color: white;
+                font-size: 20px;
+                cursor: pointer;
+                opacity: 0.8;
+            }
+            .btn-close-sm:hover { opacity: 1; }
+
+            .chat-messages {
+                flex: 1;
+                padding: 15px;
+                overflow-y: auto;
+                background: #f9f9f9;
+                display: flex;
+                flex-direction: column;
+                gap: 10px;
+            }
+
+            /* 消息气泡样式 */
+            .message {
+                max-width: 85%;
+                padding: 10px 14px;
+                border-radius: 12px;
+                font-size: 14px;
+                line-height: 1.5;
+                word-wrap: break-word;
+            }
+            .user-message {
+                align-self: flex-end;
+                background: #667eea;
+                color: white;
+                border-bottom-right-radius: 2px;
+            }
+            .ai-message {
+                align-self: flex-start;
+                background: white;
+                color: #333;
+                border: 1px solid #ddd;
+                border-bottom-left-radius: 2px;
+            }
+            .system-message {
+                align-self: center;
+                background: #eef2f7;
+                color: #666;
+                font-size: 12px;
+                text-align: center;
+                max-width: 95%;
+            }
+
+            .chat-input-area {
+                padding: 10px;
+                background: white;
+                border-top: 1px solid #eee;
+                display: flex;
+                gap: 8px;
+            }
+
+            .chat-input {
+                flex: 1;
+                padding: 8px 12px;
+                border: 1px solid #ddd;
+                border-radius: 20px;
+                outline: none;
+                font-size: 14px;
+            }
+            .chat-input:focus { border-color: #667eea; }
+
+            .btn-send {
+                background: #667eea;
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 20px;
+                cursor: pointer;
+                font-size: 14px;
+            }
+            .btn-send:hover { background: #5a6fd6; }
+            .btn-send:disabled { background: #ccc; cursor: not-allowed; }
+
+            /* 滚动条美化 */
+            .chat-messages::-webkit-scrollbar { width: 6px; }
+            .chat-messages::-webkit-scrollbar-thumb { background: #ccc; border-radius: 3px; }
     </style>
 </head>
 <body>
@@ -129,7 +270,10 @@
             </div></div>
         </div>
         <div class="col-md-6">
-            <div class="card"><div class="card-body" id="soc-display"></div></div>
+            <div class="card"><div class="card-body">
+                <h5>配电网电池容量SOC</h5>
+                <div id="soc-display"></div>
+            </div></div>
         </div>
     </div>
 
@@ -162,6 +306,24 @@
 
     <!-- LLM 回答面板 -->
     <div id="llm-container"></div>
+        <!-- LLM 智能助手聊天悬浮窗 -->
+        <button id="llm-chat-toggle" class="llm-chat-toggle" onclick="toggleChatWindow()">💬</button>
+        <div id="llm-chat-widget" class="llm-chat-widget" style="display:none;">
+            <div class="chat-header">
+                🤖 配电网调度专家
+                <button class="btn-close-sm" onclick="toggleChatWindow()">×</button>
+            </div>
+            <div class="chat-messages" id="chat-messages">
+                <div class="system-message">
+                    你好！我是配电网调度专家助手。你可以问我关于电压控制、策略选择或电力系统知识的问题。<br>
+                    当前系统状态已同步：Step <span id="chat-sync-step">-</span>, 策略：<span id="chat-sync-policy">-</span>
+                </div>
+            </div>
+            <div class="chat-input-area">
+                <input id="chat-input" class="chat-input" type="text" placeholder="请输入问题..." onkeypress="handleChatKeyPress(event)">
+                <button class="btn-send" onclick="sendChatMessage()">发送</button>
+            </div>
+        </div>
 </div>
 
 <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
@@ -170,6 +332,96 @@
 const socket = io();  // 连接到 Socket.IO 服务器
 const batNames = ['Battery.batt1','Battery.batt2','Battery.batt3','Battery.batt4','Battery.batt5'];
 const pvNames = ['s846pv','s850pv','s858pv','s862pv','s854pv'];
+// === LLM 聊天悬浮窗逻辑 ===
+function toggleChatWindow() {
+    const widget = document.getElementById('llm-chat-widget');
+    const toggleBtn = document.getElementById('llm-chat-toggle');
+    if (widget.style.display === 'none' || widget.style.display === '') {
+        widget.style.display = 'flex';
+        toggleBtn.style.display = 'none';
+        setTimeout(() => document.getElementById('chat-input').focus(), 100);
+    } else {
+        widget.style.display = 'none';
+        toggleBtn.style.display = 'flex';
+    }
+}
+
+function handleChatKeyPress(event) {
+    if (event.key === 'Enter') {
+        sendChatMessage();
+    }
+}
+
+function sendChatMessage() {
+    const input = document.getElementById('chat-input');
+    const message = input.value.trim();
+    if (!message) return;
+    appendMessage('user', message);
+    input.value = '';
+    const sendBtn = document.querySelector('.btn-send');
+    sendBtn.disabled = true;
+    sendBtn.innerText = '...';
+    // 创建AI消息气泡（流式追加）
+    let aiMsgDiv = document.createElement('div');
+    aiMsgDiv.className = 'message ai-message';
+    aiMsgDiv.id = 'ai-stream-msg';
+    document.getElementById('chat-messages').appendChild(aiMsgDiv);
+    document.getElementById('chat-messages').scrollTop = document.getElementById('chat-messages').scrollHeight;
+    socket.emit('send_chat_message', {
+        message: message,
+        context: {
+            step: document.getElementById('step') ? document.getElementById('step').innerText : '-',
+            policy: document.getElementById('policy') ? document.getElementById('policy').innerText : '-',
+            lowBuses: document.getElementById('low-buses') ? document.getElementById('low-buses').innerText : '-',
+            highBuses: document.getElementById('high-buses') ? document.getElementById('high-buses').innerText : '-'
+        }
+    });
+}
+
+function appendMessage(sender, text) {
+    const container = document.getElementById('chat-messages');
+    const div = document.createElement('div');
+    div.className = `message ${sender}-message`;
+    div.innerHTML = text.replace(/\n/g, '<br>');
+    container.appendChild(div);
+    container.scrollTop = container.scrollHeight;
+}
+
+// 接收后端回复
+// 流式接收AI回复
+socket.on('receive_chat_response', function(data) {
+    const sendBtn = document.querySelector('.btn-send');
+    // 首次收到AI回复时不解锁按钮，等流式结束后再解锁（可用定时器或特殊结束信号优化）
+    if (data && data.text) {
+        let aiMsgDiv = document.getElementById('ai-stream-msg');
+        if (!aiMsgDiv) {
+            // 若未创建气泡则新建
+            aiMsgDiv = document.createElement('div');
+            aiMsgDiv.className = 'message ai-message';
+            aiMsgDiv.id = 'ai-stream-msg';
+            document.getElementById('chat-messages').appendChild(aiMsgDiv);
+        }
+        aiMsgDiv.innerHTML += data.text.replace(/\n/g, '<br>');
+        document.getElementById('chat-messages').scrollTop = document.getElementById('chat-messages').scrollHeight;
+    }
+    // 可选：检测流式结束信号，解锁按钮
+    // 这里简单做法：若AI回复长度超过一定阈值或收到空内容则解锁
+    if (!data.text || data.text.length < 2) {
+        sendBtn.disabled = false;
+        sendBtn.innerText = '发送';
+        // 移除id，防止下次流式冲突
+        let aiMsgDiv = document.getElementById('ai-stream-msg');
+        if (aiMsgDiv) aiMsgDiv.id = '';
+    }
+});
+
+// 同步 Step 和 Policy 到聊天窗口
+socket.on('update_state', function(state) {
+    const syncStep = document.getElementById('chat-sync-step');
+    const syncPolicy = document.getElementById('chat-sync-policy');
+    if(syncStep) syncStep.innerText = state.step || '-';
+    if(syncPolicy) syncPolicy.innerText = state.current_policy || '-';
+});
 
 // === 归一化动作还原参数（如需调整请同步后端） ===
 const BATTERY_MAX_KW = 2000; // kW, 电池最大充/放电功率

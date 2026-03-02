@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PMU Frequency Correction Model - Final Version</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;700&family=Roboto:wght@400;500;700&display=swap');
+
+        :root {
+            /* 严格定义的莫兰迪色系 (Hex) */
+            --bg-grid: #F9FAFB;
+            --stroke-dark: #455A64;
+            --stroke-light: #90A4AE;
+            
+            --c-pmu: #B3D9FF;       /* 输入蓝 */
+            --c-tcn: #FFE0B2;       /* TCN 橙 */
+            --c-attn: #F8BBD0;      /* 注意力粉 */
+            --c-pool: #E1BEE7;      /* 池化紫 */
+            --c-phys: #C8E6C9;      /* 物理绿 */
+            --c-concat: #9575CD;    /* 拼接深紫 */
+            --c-reg: #BBDEFB;       /* 回归浅蓝 */
+            --c-out: #FFCDD2;       /* 输出红 */
+            --c-base: #DCEDC8;      /* 基线绿 */
+        }
+
+        body {
+            margin: 0;
+            padding: 40px;
+            background-color: #eceff1;
+            font-family: 'Roboto', 'Noto Sans SC', sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+
+        .canvas {
+            width: 1400px;
+            height: 900px;
+            background: white;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.1);
+            position: relative;
+            overflow: hidden;
+        }
+
+        svg {
+            width: 100%;
+            height: 100%;
+        }
+
+        /* 文本样式类 */
+        text { font-family: 'Roboto', 'Noto Sans SC', sans-serif; }
+        .t-title { font-size: 18px; font-weight: 700; fill: #263238; }
+        .t-body { font-size: 14px; font-weight: 500; fill: #37474F; }
+        .t-small { font-size: 12px; font-weight: 400; fill: #546E7A; }
+        .t-math { font-family: 'Times New Roman', serif; font-style: italic; }
+        
+        /* 阴影滤镜 */
+        .shadow { filter: drop-shadow(2px 4px 6px rgba(0,0,0,0.08)); }
+    </style>
+</head>
+<body>
+
+<div class="canvas">
+    <svg viewBox="0 0 1400 900" xmlns="http://www.w3.org/2000/svg">
+        <!-- 定义箭头 -->
+        <defs>
+            <marker id="arr-dark" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+                <path d="M0,0 L0,6 L9,3 z" fill="#455A64" />
+            </marker>
+            <marker id="arr-green" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+                <path d="M0,0 L0,6 L9,3 z" fill="#2E7D32" />
+            </marker>
+            <marker id="arr-red" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto">
+                <path d="M0,0 L0,6 L9,3 z" fill="#C62828" />
+            </marker>
+        </defs>
+
+        <!-- 背景网格 (20px) -->
+        <pattern id="grid" width="20" height="20" patternUnits="userSpaceOnUse">
+            <path d="M 20 0 L 0 0 0 20" fill="none" stroke="#F0F0F0" stroke-width="1"/>
+        </pattern>
+        <rect width="100%" height="100%" fill="url(#grid)" />
+
+        <!-- ================= 标题 ================= -->
+        <text x="700" y="50" text-anchor="middle" class="t-title">
+            基于 PMU 频率时序数据与物理特征融合的电力系统频率修正量预测模型
+        </text>
+
+        <!-- ================= 1. 左上：PMU 输入 ================= -->
+        <!-- Pos: (100, 120), Size: 240x100 -->
+        <g transform="translate(100, 120)" class="shadow">
+            <rect x="0" y="0" width="240" height="100" rx="12" fill="var(--c-pmu)" stroke="var(--stroke-dark)" stroke-width="1.5"/>
+            <text x="120" y="35" text-anchor="middle" class="t-body">PMU 频率时序数据</text>
+            <!-- 波形 -->
+            <path d="M 40 65 Q 65 45, 90 65 T 140 65 T 190 65" fill="none" stroke="white" stroke-width="2" opacity="0.6"/>
+            <path d="M 40 65 C 55 35, 75 95, 100 65 S 145 35, 170 65 S 205 95, 200 65" fill="none" stroke="#1565C0" stroke-width="2.5" stroke-linecap="round"/>
+        </g>
+
+        <!-- 箭头 1: PMU -> TCN (水平) -->
+        <line x1="340" y1="170" x2="390" y2="170" stroke="var(--stroke-dark)" stroke-width="2" marker-end="url(#arr-dark)"/>
+
+        <!-- ================= 2. 中央：TCN-Attention 大框 ================= -->
+        <!-- Pos: (390, 80), Size: 660x240 -->
+        <g transform="translate(390, 80)">
+            <!-- 虚线外框 -->
+            <rect x="0" y="0" width="660" height="240" rx="15" fill="none" stroke="#546E7A" stroke-width="2" stroke-dasharray="8,4" opacity="0.5"/>
+            <text x="20" y="-10" class="t-small" style="font-size: 13px; fill: #546E7A;">TCN-Attention 时序特征提取模块</text>
+
+            <!-- 2.1 TCN 子模块 -->
+            <!-- Pos: (20, 20), Size: 210x200 -->
+            <g transform="translate(20, 20)" class="shadow">
+                <rect x="0" y="0" width="210" height="200" rx="10" fill="var(--c-tcn)" stroke="var(--stroke-dark)" stroke-width="1.5"/>
+                <text x="105" y="30" text-anchor="middle" class="t-body">时间卷积网络 (TCN)</text>
+                
+                <!-- 内部块 -->
+                <g transform="translate(25, 50)">
+                    <rect x="0" y="0" width="160" height="32" rx="6" fill="white" opacity="0.6"/>
+                    <text x="80" y="21" text-anchor="middle" class="t-small">膨胀卷积 d=1 → 快动态</text>
+                    
+                    <line x1="80" y1="32" x2="80" y2="42" stroke="#546E7A" stroke-width="1.5"/>
+                    <rect x="0" y="42" width="160" height="32" rx="6" fill="white" opacity="0.6"/>
+                    <text x="80" y="63" text-anchor="middle" class="t-small">膨胀卷积 d=2 → 中动态</text>
+                    
+                    <line x1="80" y1="74" x2="80" y2="84" stroke="#546E7A" stroke-width="1.5"/>
+                    <rect x="0" y="84" width="160" height="32" rx="6" fill="white" opacity="0.6"/>
+                    <text x="80" y="105" text-anchor="middle" class="t-small">d=2^(N-1) → 慢动态</text>
+                </g>
+                <text x="105" y="185" text-anchor="middle" class="t-small" style="font-size: 11px;">残差连接 + 因果约束</text>
+            </g>
+
+            <!-- 箭头 2: TCN -> Attention (水平) -->
+            <line x1="230" y1="120" x2="270" y2="120" stroke="var(--stroke-dark)" stroke-width="2" marker-end="url(#arr-dark)"/>
+
+            <!-- 2.2 Attention 子模块 -->
+            <!-- Pos: (270, 20), Size: 370x200 -->
+            <g transform="translate(270, 20)" class="shadow">
+                <rect x="0" y="0" width="370" height="200" rx="10" fill="var(--c-attn)" stroke="var(--stroke-dark)" stroke-width="1.5"/>
+                <text x="185" y="30" text-anchor="middle" class="t-body">多头自注意力机制</text>
+
+                <!-- Q, K, V -->
+                <circle cx="90" cy="85" r="20" fill="white" stroke="#E91E63" stroke-width="2"/>
+                <text x="90" y="92" text-anchor="middle" class="t-body t-math">Q</text>
+                
+                <circle cx="145" cy="85" r="20" fill="white" stroke="#E91E63" stroke-width="2"/>
+                <text x="145" y="92" text-anchor="middle" class="t-body t-math">K</text>
+                
+                <circle cx="200" cy="85" r="20" fill="white" stroke="#E91E63" stroke-width="2"/>
+                <text x="200" y="92" text-anchor="middle" class="t-body t-math">V</text>
+
+                <!-- 公式框 -->
+                <rect x="60" y="120" width="250" height="55" rx="8" fill="white" opacity="0.9"/>
+                <text x="185" y="142" text-anchor="middle" class="t-small t-math">Softmax(QK^T / √d)V</text>
+                <text x="185" y="162" text-anchor="middle" class="t-small" style="font-size: 11px;">聚焦关键响应时刻</text>
+            </g>
+        </g>
+
+        <!-- 箭头 3: Attention -> Pooling (垂直向下) -->
+        <line x1="1050" y1="200" x2="1050" y2="250" stroke="var(--stroke-dark)" stroke-width="2" marker-end="url(#arr-dark)"/>
+
+        <!-- ================= 3. 全局池化 ================= -->
+        <!-- Pos: (950, 250), Size: 200x60 -->
+        <g transform="translate(950, 250)" class="shadow">
+            <rect x="0" y="0" width="200" height="60" rx="12" fill="var(--c-pool)" stroke="var(--stroke-dark)" stroke-width="1.5"/>
+            <text x="100" y="35" text-anchor="middle" class="t-body">全局池化 (Global Pooling)</text>
+        </g>
+
+        <!-- 箭头 4: Pooling -> Concat (垂直向下) -->
+        <line x1="1050" y1="310" x2="1050" y2="370" stroke="var(--stroke-dark)" stroke-width="2" marker-end="url(#arr-dark)"/>
+
+        <!-- ================= 4. 左下：物理特征 ================= -->
+        <!-- Pos: (100, 320), Size: 240x140 -->
+        <g transform="translate(100, 320)" class="shadow">
+            <rect x="0" y="0" width="240" height="140" rx="12" fill="var(--c-phys)" stroke="var(--stroke-dark)" stroke-width="1.5"/>
+            <text x="120" y="30" text-anchor="middle" class="t-body">物理特征向量</text>
+            
+            <text x="20" y="60" class="t-small t-math">H·Σ (惯性常数)</text>
+            <text x="20" y="85" class="t-small t-math">D* (阻尼系数)</text>
+            <text x="20" y="110" class="t-small t-math">df/dt|₀</text>
+            <text x="20" y="130" class="t-small">...</text>
+        </g>
+
+        <!-- 箭头 5: Phys -> Concat (水平虚线) -->
+        <line x1="340" y1="390" x2="1020" y2="390" stroke="#2E7D32" stroke-width="2" stroke-dasharray="6,4" marker-end="url(#arr-green)"/>
+
+        <!-- ================= 5. 拼接节点 (+) ================= -->
+        <!-- Pos: (1020, 370) Center -->
+        <g transform="translate(1020, 370)">
+            <circle cx="30" cy="30" r="30" fill="var(--c-concat)" stroke="white" stroke-width="3" class="shadow"/>
+            <text x="30" y="38" text-anchor="middle" fill="white" font-weight="bold" font-size="26">+</text>
+            <text x="30" y="75" text-anchor="middle" class="t-small">拼接</text>
+        </g>
+
+        <!-- 箭头 6: Concat -> Regressor (水平) -->
+        <line x1="1080" y1="400" x2="1130" y2="400" stroke="var(--stroke-dark)" stroke-width="2" marker-end="url(#arr-dark)"/>
+
+        <!-- ================= 6. 轻量回归头 ================= -->
+        <!-- Pos: (1130, 370), Size: 160x60 -->
+        <g transform="translate(1130, 370)" class="shadow">
+            <rect x="0" y="0" width="160" height="60" rx="12" fill="var(--c-reg)" stroke="var(--stroke-dark)" stroke-width="1.5"/>
+            <text x="80" y="35" text-anchor="middle" class="t-body">轻量回归头</text>
+        </g>
+
+        <!-- 箭头 7: Regressor -> Output Block (折线) -->
+        <line x1="1290" y1="400" x2="1330" y2="400" stroke="var(--stroke-dark)" stroke-width="2"/>
+        <line x1="1330" y1="400" x2="1330" y2="480" stroke="var(--stroke-dark)" stroke-width="2" marker-end="url(#arr-dark)"/>
+
+        <!-- ================= 7. 输出与校正 (垂直堆叠) ================= -->
+        
+        <!-- 7.1 修正量输出 (上) -->
+        <!-- Pos: (1180, 480), Size: 240x100 -->
+        <g transform="translate(1180, 480)" class="shadow">
+            <rect x="0" y="0" width="240" height="100" rx="12" fill="var(--c-out)" stroke="#C62828" stroke-width="2"/>
+            <text x="120" y="25" text-anchor="middle" class="t-body" fill="#B71C1C">修正量输出</text>
+            <text x="120" y="55" text-anchor="middle" class="t-small t-math">Δf<tspan baseline-shift="sub" font-size="10">nadir</tspan> (频率最低点偏差)</text>
+            <text x="120" y="75" text-anchor="middle" class="t-small t-math">ΔP<tspan baseline-shift="sub" font-size="10">loss</tspan> (功率缺额偏差)</text>
+        </g>
+
+        <!-- 箭头 8: 修正量 -> 基线 (垂直向下) -->
+        <line x1="1300" y1="580" x2="1300" y2="610" stroke="#2E7D32" stroke-width="2" marker-end="url(#arr-green)"/>
+
+        <!-- 7.2 GSFR 基线估计 (下) -->
+        <!-- Pos: (1180, 610), Size: 240x80 -->
+        <g transform="translate(1180, 610)" class="shadow">
+            <rect x="0" y="0" width="240" height="80" rx="12" fill="var(--c-base)" stroke="#2E7D32" stroke-width="1.5"/>
+            <text x="120" y="25" text-anchor="middle" class="t-body" fill="#1B5E20">GSFR 基线估计</text>
+            <text x="120" y="55" text-anchor="middle" class="t-small t-math">f̂<tspan baseline-shift="sub" font-size="10">nadir</tspan>, P̂<tspan baseline-shift="sub" font-size="10">loss</tspan></text>
+        </g>
+
+        <!-- ================= 8. 最终相加操作 ================= -->
+        <!-- 加号圆圈 Pos: (1460, 560) Center -->
+        <g transform="translate(1460, 560)">
+            <circle cx="25" cy="25" r="22" fill="white" stroke="#2E7D32" stroke-width="2.5" class="shadow"/>
+            <text x="25" y="33" text-anchor="middle" fill="#2E7D32" font-weight="bold" font-size="22">+</text>
+        </g>
+
+        <!-- 连接线：修正量 -> + (右侧引出) -->
+        <path d="M 1420 530 L 1450 530 L 1450 575" fill="none" stroke="#C62828" stroke-width="2" marker-end="url(#arr-red)"/>
+        
+        <!-- 连接线：基线 -> + (右侧引出) -->
+        <path d="M 1420 650 L 1450 650 L 1450 605" fill="none" stroke="#2E7D32" stroke-width="2" marker-end="url(#arr-green)"/>
+
+        <!-- 最终输出箭头 -->
+        <line x1="1485" y1="585" x2="1560" y2="585" stroke="var(--stroke-dark)" stroke-width="2.5" marker-end="url(#arr-dark)"/>
+        <text x="1520" y="575" class="t-body" fill="#263238">最终预测值</text>
+        <text x="1520" y="595" class="t-small">(融合修正后)</text>
+
+    </svg>
+</div>
+
+</body>
+</html>
