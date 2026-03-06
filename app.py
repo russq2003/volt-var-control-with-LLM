@@ -14,8 +14,20 @@ from Qwen import call_qwen
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
 
+PROMPT_FILE_PATH = os.path.join(os.path.dirname(__file__), 'system_prompt.txt')
+
 # 获取当前工作目录
 script_dir = os.path.dirname(os.path.abspath(__file__))
+
+def load_system_prompt():
+    try:
+        with open(PROMPT_FILE_PATH, 'r', encoding='utf-8') as f:
+            return f.read()
+    except FileNotFoundError:
+        print(f"⚠️ 警告：未找到 {PROMPT_FILE_PATH}，使用默认提示词。")
+        return "你是一个有用的助手。"
+    
+SYSTEM_PROMPT = load_system_prompt()
 
 # 启动 test.py 子进程
 proc = subprocess.Popen(
@@ -50,7 +62,7 @@ def monitor_simulation():
                 try:
                     json_str = line.split("SIM_STATE:", 1)[1].strip()
                     state = json.loads(json_str)
-                    socketio.emit('update_state', state)
+                    socketio.emit('update_state', state)    # 发送state到前端
                 except Exception as e:
                     print(f"[ERROR] State parse error: {e}", flush=True)
 
@@ -69,7 +81,7 @@ def monitor_simulation():
 def index():
     return render_template('index.html')
 
-@socketio.on('send_decision')
+@socketio.on('send_decision')    # 装饰器，监听前端发送的 'send_decision' 事件
 def receive_decision(data):
     """
     接收来自网页前端的策略决策，通过 stdin 管道发送给子进程
@@ -91,8 +103,8 @@ def receive_decision(data):
         # 通过 stdin 管道发送决策给子进程
         try:
             print(f"[APP] 正在发送决策到子进程: {chosen_policy}", flush=True)
-            proc.stdin.write(chosen_policy + '\n')
-            proc.stdin.flush()
+            proc.stdin.write(chosen_policy + '\n')  # 写入test.py的标准输入
+            proc.stdin.flush()  # 刷新输入缓冲区
             print(f"[APP] ✅ 决策已发送: {chosen_policy}", flush=True)
             
         except Exception as e:
@@ -125,8 +137,8 @@ def handle_chat_message(json_data):
     context = json_data.get('context', {})
     
     # 1. 构建 Prompt (结合当前电网状态)
-    system_prompt = f"""
-    你是配电网调度专家。
+    current_state= f"""
+    
     当前系统状态：
     - Step: {context.get('step')}
     - 策略：{context.get('policy')}
@@ -138,7 +150,7 @@ def handle_chat_message(json_data):
     
     # 2. 调用你的 LLM 函数 (复用之前的 llm_client 或 test.py 中的逻辑)
     # 假设你有一个函数 get_llm_response(prompt)
-    full_prompt = system_prompt + "\n用户问题：" + user_msg
+    full_prompt = SYSTEM_PROMPT + current_state + "\n用户问题：" + user_msg
     # 3. 流式推送到前端
     explanation = ""
     for chunk in call_qwen(full_prompt):
