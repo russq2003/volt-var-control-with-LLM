@@ -6,7 +6,7 @@ from langchain_community.document_loaders import TextLoader
 from sentence_transformers import SentenceTransformer
 import faiss
 import numpy as np
-from Qwen import call_qwen
+from LLM import call_LLM
 from langchain_community.chains import RetrievalQA
 
 text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
@@ -22,15 +22,15 @@ index.add(np.array(embeddings, dtype=np.float32))
 query_embedding = model.encode(["测试文本的查询"])
 distances, indices = index.search(np.array(query_embedding), k=5)
 
-def qwen_llm(prompt, max_tokens=800):
+def deepseek_llm(prompt, max_tokens=800):
     # 收集流式输出
     result = ""
-    for chunk in call_qwen(prompt, max_tokens=max_tokens):
+    for chunk in call_LLM(prompt, max_tokens=max_tokens):
         result += chunk
     return result
 
-# 用qwen_llm作为llm接口
-chain = RetrievalQA.from_chain_type(llm=qwen_llm,
+# 用deepseek_llm作为llm接口
+chain = RetrievalQA.from_chain_type(llm=deepseek_llm,
                                     retriever=index.as_retriever(),
                                     return_source_documents=True)
 

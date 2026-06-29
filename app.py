@@ -9,7 +9,7 @@ import os
 from flask import Flask, render_template, jsonify
 from flask_socketio import SocketIO
 from topology_server import extract_topology_from_env
-from Qwen import call_qwen
+from LLM import call_LLM
 
 app = Flask(__name__)
 socketio = SocketIO(app, cors_allowed_origins="*")
@@ -153,7 +153,7 @@ def handle_chat_message(json_data):
     full_prompt = SYSTEM_PROMPT + current_state + "\n用户问题：" + user_msg
     # 3. 流式推送到前端
     explanation = ""
-    for chunk in call_qwen(full_prompt):
+    for chunk in call_LLM(full_prompt):
         explanation += chunk
         socketio.emit('receive_chat_response', {'text': chunk})
 

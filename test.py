@@ -1,6 +1,6 @@
 '''负责运行配电网环境PowerGym。
 执行三种控制策略 PARS (你的LSTM策略), PPO, SAC。
-关键逻辑: 当检测到电压异常或电池SOC极端时,调用 LLM (Qwen) 进行分析，并暂停等待用户指令来决定是否切换策略。
+关键逻辑: 当检测到电压异常或电池SOC极端时,调用 LLM (DeepSeek) 进行分析，并暂停等待用户指令来决定是否切换策略。
 通信方式: 通过标准输出 (stdout) 发送状态数据，通过标准输入 (stdin) 接收用户决策。'''
 
 import matplotlib.pyplot as plt
@@ -18,7 +18,7 @@ import json
 from env_register import make_env, remove_parallel_dss
 from obserfilter import RunningStat
 from policy_LSTM import LinearPolicy, FullyConnectedNeuralNetworkPolicy, LSTMPolicy
-from Qwen import call_qwen
+from LLM import call_LLM
 
 sys.path.append(os.getcwd())
 
@@ -358,7 +358,7 @@ class SingleRolloutSlaver(object):
         current_main_policy = "PARS"
         while not done:
 
-            time.sleep(0.5)
+            rollout_time = 2
             
             ob_A = np.asarray(ob_A, dtype=np.float64)
             ob_B = np.asarray(ob_B, dtype=np.float64)
@@ -405,7 +405,7 @@ class SingleRolloutSlaver(object):
                 prompt = llm_prompt(self.env, action_combined, PPO_action[8:], SAC_action[8:], current_main_policy)
 
                 explanation = ""
-                for chunk in call_qwen(prompt):
+                for chunk in call_LLM(prompt):
                     # print(chunk, end="", flush=True) # end="" 防止换行，flush=True 确保立即输出
                     explanation += chunk
 
@@ -527,6 +527,8 @@ class SingleRolloutSlaver(object):
                         ]
                     }
             
+            # time.sleep(rollout_time - wait_count*0.1)  # 减去等待用户决策的时间，确保每步总时长约为 rollout_time 秒
+
             # 根据当前策略选择动作
             selected_action = policy_actions[current_main_policy]
             ob_dict, reward, done, _ = self.env.step(selected_action, purterbations=purterbations)
@@ -646,7 +648,8 @@ def run_episodic_random_agent(args, PVmode, worker_idx=None):
 
 if __name__ == '__main__':
     print("[INIT] Starting test.py", flush=True)
-    
+    SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
     parser = argparse.ArgumentParser()
     parser.add_argument('--env_name', default='34Bus')
     parser.add_argument('--seed', type=int, default=509)
@@ -659,14 +662,17 @@ if __name__ == '__main__':
     parser.add_argument('--PVmode', type=int, default=1)
     parser.add_argument('--gen_ls_csv', type=bool, default=True)
     parser.add_argument('--stack_num', type=int, default=1)
-    parser.add_argument('--PPO_model_dir', type=str, default=r"D:/powergym_standard_version/powergym_standard_version/MAPPO_model")
-    parser.add_argument('--SAC_model_dir', type=str, default=r"D:/powergym_standard_version/powergym_standard_version/MASAC_model")
+    parser.add_argument('--PPO_model_dir', type=str, default="MAPPO_model")
+    parser.add_argument('--SAC_model_dir', type=str, default="MASAC_model")
     
     args = parser.parse_args()
     print("[INIT] Arguments parsed", flush=True)
+    args.PPO_model_dir = os.path.join(SCRIPT_DIR, args.PPO_model_dir)
+    args.SAC_model_dir = os.path.join(SCRIPT_DIR, args.SAC_model_dir)
 
     print("[INIT] Getting environment dimensions...", flush=True)
     OB, AC, OB_DIM_A, OB_DIM_B, OB_DIM_C = get_dims(args)
+    os.chdir(SCRIPT_DIR)
     print(f"[INIT] Dimensions obtained: OB={OB}, OB_DIM_A={OB_DIM_A}, OB_DIM_B={OB_DIM_B}, OB_DIM_C={OB_DIM_C}", flush=True)
 
     print("\n--- Generating Baselines ---", flush=True)
@@ -697,14 +703,15 @@ if __name__ == '__main__':
                                  PVmode=args.PVmode)
     print("[LSTM] SingleRolloutSlaver initialized", flush=True)
 
-    model_dir = 'D:/powergym_standard_version/powergym_standard_version/' 
+    os.chdir(SCRIPT_DIR)
+
     iter_num = 1430
 
-    print(f"[MODEL] Loading models from {model_dir} at iter {iter_num}...", flush=True)
+    print(f"[MODEL] Loading LSTM model at iter {iter_num}...", flush=True)
     try:
-        trained_para_A = np.load(f'{model_dir}LSTM_policy_A_{iter_num}.npz', allow_pickle=True)
-        trained_para_B = np.load(f'{model_dir}LSTM_policy_B_{iter_num}.npz', allow_pickle=True)
-        trained_para_C = np.load(f'{model_dir}LSTM_policy_C_{iter_num}.npz', allow_pickle=True)
+        trained_para_A = np.load(f'LSTM_policy_A_{iter_num}.npz', allow_pickle=True)
+        trained_para_B = np.load(f'LSTM_policy_B_{iter_num}.npz', allow_pickle=True)
+        trained_para_C = np.load(f'LSTM_policy_C_{iter_num}.npz', allow_pickle=True)
         print(f"[MODEL] Model files loaded successfully", flush=True)
 
         trained_weights_A = trained_para_A['arr_0'][0]
@@ -785,7 +792,7 @@ if __name__ == '__main__':
         plt.show()
 
         plt.figure(figsize=(10, 5))
-        rew_list = np.load(f'{model_dir}rew_output_1500.npz',allow_pickle=True)
+        rew_list = np.load('rew_output_1500.npz',allow_pickle=True)
         rew_list1 = rew_list['arr_0'].tolist()
         plt.plot(rew_list1)
         plt.xlabel('Episodes')
@@ -795,9 +802,8 @@ if __name__ == '__main__':
         plt.show()
 
     except FileNotFoundError:
-        print("\n[Error] Model files not found!")
-        print(f"Please check the path: {model_dir}")
-        print("Make sure 'LSTM_policy_X_1500.npz' files exist.")
+        print("\n[Error] Model files not found in current directory!")
+        print("Make sure 'LSTM_policy_A/B/C_*.npz' files exist alongside test.py.")
     except Exception as e:
         print(f"\n[Error] An unexpected error occurred: {e}")
         traceback.print_exc()
